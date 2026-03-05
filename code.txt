@@ -1,0 +1,73 @@
+public Map<String, Long> getMonthlyDistinctAccounts(String from, String to) {
+
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy_MM");
+
+    YearMonth start = YearMonth.parse(from, formatter);
+    YearMonth end = YearMonth.parse(to, formatter);
+
+    Instant startDate = start.atDay(1)
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant();
+
+    Instant endDate = end.atEndOfMonth()
+            .atTime(23, 59, 59)
+            .toInstant(ZoneOffset.UTC);
+
+    SearchResponse<Void> response = elasticsearchClient.search(s -> s
+            .index("your_index")
+            .size(0)
+
+            // filter documents in date range
+            .query(q -> q
+                    .range(r -> r
+                            .field("createdDate")
+                            .gte(JsonData.of(startDate))
+                            .lte(JsonData.of(endDate))
+                    )
+            )
+
+            // aggregation
+            .aggregations("monthly_accounts", a -> a
+                    .dateHistogram(dh -> dh
+                            .field("createdDate")
+                            .calendarInterval(CalendarInterval.Month)
+                            .format("yyyy_MM")
+                            .minDocCount(0)
+
+                            // ensures empty months are returned
+                            .extendedBounds(eb -> eb
+                                    .min(JsonData.of(startDate))
+                                    .max(JsonData.of(endDate))
+                            )
+                    )
+
+                    // sub aggregation for distinct accountNo
+                    .aggregations("distinct_accounts", sub -> sub
+                            .cardinality(c -> c
+                                    .field("accountNo.keyword")
+                            )
+                    )
+            ), Void.class
+    );
+
+    Map<String, Long> result = new LinkedHashMap<>();
+
+    List<DateHistogramBucket> buckets =
+            response.aggregations()
+                    .get("monthly_accounts")
+                    .dateHistogram()
+                    .buckets()
+                    .array();
+
+    for (DateHistogramBucket bucket : buckets) {
+
+        long count = bucket.aggregations()
+                .get("distinct_accounts")
+                .cardinality()
+                .value();
+
+        result.put(bucket.keyAsString(), count);
+    }
+
+    return result;
+}
