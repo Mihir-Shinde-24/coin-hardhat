@@ -71,3 +71,101 @@ public Map<String, Long> getMonthlyDistinctAccounts(String from, String to) {
 
     return result;
 }
+----------------------------------------------------
+
+
+
+public Map<String, Long> getMonthlyDistinctAccounts(String from, String to) {
+
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy_MM");
+
+    YearMonth start = YearMonth.parse(from, formatter);
+    YearMonth end = YearMonth.parse(to, formatter);
+
+    Instant startDate = start.atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+    Instant endDate = end.atEndOfMonth().atTime(23,59,59).toInstant(ZoneOffset.UTC);
+
+    Map<String, Set<String>> monthAccounts = new HashMap<>();
+
+    Map<String, FieldValue> afterKey = null;
+
+    while (true) {
+
+        Map<String, FieldValue> finalAfterKey = afterKey;
+
+        SearchResponse<Void> response = elasticsearchClient.search(s -> s
+                .index("your_index")
+                .size(0)
+
+                .query(q -> q
+                        .range(r -> r
+                                .field("createdDate")
+                                .gte(JsonData.of(startDate))
+                                .lte(JsonData.of(endDate))
+                        )
+                )
+
+                .aggregations("monthly_accounts", a -> a
+                        .composite(c -> {
+
+                            CompositeAggregation.Builder builder = new CompositeAggregation.Builder()
+                                    .size(10000)
+                                    .sources(List.of(
+                                            Map.of("month",
+                                                    CompositeAggregationSource.of(cs -> cs
+                                                            .dateHistogram(dh -> dh
+                                                                    .field("createdDate")
+                                                                    .calendarInterval(CalendarInterval.Month)
+                                                                    .format("yyyy_MM")
+                                                            )
+                                                    )
+                                            ),
+                                            Map.of("account",
+                                                    CompositeAggregationSource.of(cs -> cs
+                                                            .terms(t -> t
+                                                                    .field("accountNo")
+                                                            )
+                                                    )
+                                            )
+                                    ));
+
+                            if (finalAfterKey != null) {
+                                builder.after(finalAfterKey);
+                            }
+
+                            return builder.build();
+                        })
+                ),
+
+                Void.class
+        );
+
+        CompositeAggregate agg = response.aggregations()
+                .get("monthly_accounts")
+                .composite();
+
+        for (CompositeBucket bucket : agg.buckets().array()) {
+
+            String month = bucket.key().get("month").stringValue();
+            String account = bucket.key().get("account").stringValue();
+
+            monthAccounts
+                    .computeIfAbsent(month, k -> new HashSet<>())
+                    .add(account);
+        }
+
+        afterKey = agg.afterKey();
+
+        if (afterKey == null) {
+            break;
+        }
+    }
+
+    Map<String, Long> result = new TreeMap<>();
+
+    for (Map.Entry<String, Set<String>> entry : monthAccounts.entrySet()) {
+        result.put(entry.getKey(), (long) entry.getValue().size());
+    }
+
+    return result;
+}
