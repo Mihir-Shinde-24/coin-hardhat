@@ -169,3 +169,73 @@ public Map<String, Long> getMonthlyDistinctAccounts(String from, String to) {
 
     return result;
 }
+
+-------------------------------------------------
+
+
+SearchResponse<Void> response = elasticsearchClient.search(s -> s
+        .index("cpo_data")
+        .size(0)
+
+        // aggregation 1 → count docs before range
+        .aggregations("baseline_before_range", a -> a
+                .filter(f -> f
+                        .range(r -> r
+                                .field("lastModifiedDate")
+                                .lt(JsonData.of(startDate))
+                        )
+                )
+        )
+
+        // aggregation 2 → monthly histogram
+        .aggregations("monthly_histogram", a -> a
+                .dateHistogram(dh -> dh
+                        .field("lastModifiedDate")
+                        .calendarInterval(CalendarInterval.Month)
+                        .format("yyyy-MM")
+                        .minDocCount(0)
+                        .extendedBounds(eb -> eb
+                                .min(FieldDateMath.of(f -> f.expr(startDate)))
+                                .max(FieldDateMath.of(f -> f.expr(endDate)))
+                        )
+                )
+
+                // count per month
+                .aggregations("monthly_docs", sub -> sub
+                        .valueCount(v -> v.field("lastModifiedDate"))
+                )
+
+                // cumulative sum of monthly counts
+                .aggregations("cumulative_docs", sub -> sub
+                        .cumulativeSum(cs -> cs
+                                .bucketsPath("monthly_docs")
+                        )
+                )
+        )
+, Void.class);
+
+FilterAggregate baselineAgg = response.aggregations()
+        .get("baseline_before_range")
+        .filter();
+
+long baselineCount = baselineAgg.docCount();
+
+DateHistogramAggregate histogram = response.aggregations()
+        .get("monthly_histogram")
+        .dateHistogram();
+
+for (DateHistogramBucket bucket : histogram.buckets().array()) {
+
+    String month = bucket.keyAsString();
+
+    double cumulativeValue = bucket
+            .aggregations()
+            .get("cumulative_docs")
+            .cumulativeSum()
+            .value();
+
+    long finalRunningTotal = baselineCount + (long) cumulativeValue;
+
+    System.out.println(month + " -> " + finalRunningTotal);
+}
+
